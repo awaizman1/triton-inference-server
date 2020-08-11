@@ -52,15 +52,6 @@ namespace nib = nvidia::inferenceserver::backend;
 
 namespace {
 
-#define THROW_IF_BACKEND_MODEL_ERROR(X)            \
-  do {                                             \
-    TRITONSERVER_Error* tie_err__ = (X);           \
-    if (tie_err__ != nullptr) {                    \
-      throw nib::BackendModelException(tie_err__); \
-    }                                              \
-  } while (false)
-
-
 #ifndef TRITON_ENABLE_GPU
 using cudaStream_t = void*;
 #endif  // !TRITON_ENABLE_GPU
@@ -85,38 +76,6 @@ ParseLongLongParameter(
   }
 
   return nullptr;  // success
-}
-
-void
-RequestsRespondIfError(
-    TRITONBACKEND_Request** requests, const uint32_t request_count,
-    TRITONSERVER_Error* response_err)
-{
-  for (size_t i = 0; i < request_count; i++) {
-    TRITONBACKEND_Response* response;
-    auto err = TRITONBACKEND_ResponseNew(&response, requests[i]);
-    if (err != nullptr) {
-      LOG_MESSAGE(TRITONSERVER_LOG_ERROR, "Fail to create response");
-      TRITONSERVER_ErrorDelete(err);
-    } else {
-      std::unique_ptr<
-          TRITONBACKEND_Response, decltype(&TRITONBACKEND_ResponseDelete)>
-          response_handle(response, TRITONBACKEND_ResponseDelete);
-      err = TRITONBACKEND_ResponseSend(
-          response, TRITONSERVER_RESPONSE_COMPLETE_FINAL, response_err);
-      if (err != nullptr) {
-        LOG_MESSAGE(TRITONSERVER_LOG_ERROR, "Fail to send response");
-        TRITONSERVER_ErrorDelete(err);
-      }
-    }
-    err = TRITONBACKEND_RequestRelease(
-        requests[i], TRITONSERVER_REQUEST_RELEASE_ALL);
-    if (err != nullptr) {
-      LOG_MESSAGE(TRITONSERVER_LOG_ERROR, "Fail to release request");
-      TRITONSERVER_ErrorDelete(err);
-    }
-  }
-  TRITONSERVER_ErrorDelete(response_err);
 }
 
 // BackendConfig
@@ -1489,12 +1448,12 @@ ModelInstanceState::ProcessRequests(
     // If we get a nullptr request then something is badly wrong. Fail
     // and release all requests.
     if (requests[i] == nullptr) {
-      RequestsRespondIfError(
+      nib::RequestsRespondWithError(
           requests, request_count,
           TRITONSERVER_ErrorNew(
               TRITONSERVER_ERROR_INTERNAL,
               std::string(
-                  "null request given to TensorFlow runner for '" + Name() +
+                  "null request given to TensorFlow backend for '" + Name() +
                   "'")
                   .c_str()));
       return;
@@ -1518,7 +1477,7 @@ ModelInstanceState::ProcessRequests(
         total_batch_size += shape[0];
       }
       if (err != nullptr) {
-        RequestsRespondIfError(requests, request_count, err);
+        nib::RequestsRespondWithError(requests, request_count, err);
         return;
       }
     } else {
@@ -1539,14 +1498,13 @@ ModelInstanceState::ProcessRequests(
   // scheduler has done something badly wrong so fail and release all
   // requests.
   if ((total_batch_size != 1) && (total_batch_size > (size_t)max_batch_size)) {
-    RequestsRespondIfError(
+    nib::RequestsRespondWithError(
         requests, request_count,
         TRITONSERVER_ErrorNew(
             TRITONSERVER_ERROR_INTERNAL,
             std::string(
-                "dynamic batch size " + std::to_string(total_batch_size) +
-                " for '" + Name() + "', max allowed is " +
-                std::to_string(max_batch_size))
+                "batch size " + std::to_string(total_batch_size) + " for '" +
+                Name() + "', max allowed is " + std::to_string(max_batch_size))
                 .c_str()));
     return;
   }
@@ -2202,12 +2160,6 @@ TRITONBACKEND_ModelInstanceExecute(
   // this function. If something does go wrong in processing a
   // particular request then we send an error response just for the
   // specific request.
-
-  // Note that access to 'requests' will be invalidated once
-  // TRITONBACKEND_ModelInstanceExecute returns. If requests need to be
-  // referred after TRITONBACKEND_ModelInstanceExecute returns, i.e. in
-  // non-blocking model, the request array must be copied to a instance
-  // owned buffer.
   instance_state->ProcessRequests(requests, request_count);
 
   return nullptr;  // success
